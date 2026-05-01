@@ -8,19 +8,8 @@ require('dotenv').config();
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// ─────────────────────────────────────────────
-//  ALMACENAMIENTO EN MEMORIA
-// ─────────────────────────────────────────────
-// giveaways activos/terminados:
-// { messageId: { prize1, emoji1, winners1, prize2, emoji2, winners2,
-//                endsAt, channelId, messageId,
-//                participants1: Set, participants2: Set,
-//                lastWinners1: [], lastWinners2: [],
-//                finished: bool } }
+// giveaways activos y terminados en memoria
 const giveaways = new Map();
-
-// Datos temporales entre modal 1 y modal 2 (por userId)
-const pendingSetup = new Map();
 
 // ─────────────────────────────────────────────
 //  REGISTRO DE COMANDOS
@@ -34,7 +23,7 @@ async function registerCommands() {
 
     new SlashCommandBuilder()
       .setName('reroll')
-      .setDescription('Re-sortea los ganadores de un giveaway terminado (si el ganador no reclamó)')
+      .setDescription('Re-sortea ganadores de un giveaway terminado')
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
       .addStringOption(opt =>
         opt.setName('message_id')
@@ -78,71 +67,88 @@ client.once('ready', () => {
 // ─────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // ── /giveaway → Modal 1 (5 campos) ───────────
+  // ── /giveaway → abrir modal (1 solo, 5 campos) ──
   if (interaction.isChatInputCommand() && interaction.commandName === 'giveaway') {
     const modal = new ModalBuilder()
-      .setCustomId('giveaway_modal1')
-      .setTitle('Giveaway – Paso 1 de 2');
+      .setCustomId('giveaway_modal')
+      .setTitle('Configurar Giveaway');
+
+    // Campo 1: Premio 1 con emoji y ganadores en un solo campo
+    // Formato: "🎁 | Manga de Naruto | 1"
+    // Campo 2: Premio 2 con emoji y ganadores en un solo campo
+    // Formato: "🏆 | Rol exclusivo | 2"
+    // Campo 3: Duración
+    // Así metemos 7 datos en 3 campos y quedan 2 libres por si acaso
 
     modal.addComponents(
-      makeRow(makeInput('prize1',   'Premio 1',             'Ej: Manga físico de Naruto',    80)),
-      makeRow(makeInput('emoji1',   'Emoji para Premio 1',  'Ej: 🎁',                         8)),
-      makeRow(makeInput('winners1', 'Ganadores del Premio 1','Ej: 1  (máximo 20)',             2)),
-      makeRow(makeInput('prize2',   'Premio 2',             'Ej: Rol exclusivo del servidor', 80)),
-      makeRow(makeInput('emoji2',   'Emoji para Premio 2',  'Ej: 🏆',                         8))
+      makeRow(
+        makeInput(
+          'data1',
+          'Premio 1  →  emoji | nombre | ganadores',
+          'Ej:  🎁 | Manga de Naruto | 1',
+          100
+        )
+      ),
+      makeRow(
+        makeInput(
+          'data2',
+          'Premio 2  →  emoji | nombre | ganadores',
+          'Ej:  🏆 | Rol exclusivo | 2',
+          100
+        )
+      ),
+      makeRow(
+        makeInput(
+          'duration',
+          'Duración en minutos  (mín 1 – máx 10080)',
+          'Ej:  60',
+          5
+        )
+      )
     );
 
     await interaction.showModal(modal);
     return;
   }
 
-  // ── Modal 1 enviado → guardar y mostrar Modal 2 ─
-  if (interaction.isModalSubmit() && interaction.customId === 'giveaway_modal1') {
-    const prize1   = interaction.fields.getTextInputValue('prize1').trim();
-    const emoji1   = interaction.fields.getTextInputValue('emoji1').trim();
-    const rawW1    = interaction.fields.getTextInputValue('winners1').trim();
-    const prize2   = interaction.fields.getTextInputValue('prize2').trim();
-    const emoji2   = interaction.fields.getTextInputValue('emoji2').trim();
-    const winners1 = clamp(parseInt(rawW1, 10) || 1, 1, 20);
+  // ── Modal enviado → parsear y crear giveaway ──
+  if (interaction.isModalSubmit() && interaction.customId === 'giveaway_modal') {
+    const raw1  = interaction.fields.getTextInputValue('data1').trim();
+    const raw2  = interaction.fields.getTextInputValue('data2').trim();
+    const rawDur = interaction.fields.getTextInputValue('duration').trim();
 
-    pendingSetup.set(interaction.user.id, { prize1, emoji1, winners1, prize2, emoji2 });
+    // Parsear formato "emoji | nombre | ganadores"
+    const parts1 = raw1.split('|').map(s => s.trim());
+    const parts2 = raw2.split('|').map(s => s.trim());
 
-    const modal2 = new ModalBuilder()
-      .setCustomId('giveaway_modal2')
-      .setTitle('Giveaway – Paso 2 de 2');
-
-    modal2.addComponents(
-      makeRow(makeInput('winners2', 'Ganadores del Premio 2', 'Ej: 1  (máximo 20)',             2)),
-      makeRow(makeInput('duration', 'Duración en minutos',    'Ej: 60  (mín 1, máx 10080)',     5))
-    );
-
-    await interaction.showModal(modal2);
-    return;
-  }
-
-  // ── Modal 2 enviado → crear giveaway ──────────
-  if (interaction.isModalSubmit() && interaction.customId === 'giveaway_modal2') {
-    const setup = pendingSetup.get(interaction.user.id);
-    if (!setup) {
-      await interaction.reply({ content: '⚠️ Sesión expirada. Usa /giveaway de nuevo.', ephemeral: true });
+    if (parts1.length < 3 || parts2.length < 3) {
+      await interaction.reply({
+        content: '⚠️ Formato incorrecto. Usa el formato: `emoji | nombre del premio | número de ganadores`\nEjemplo: `🎁 | Manga de Naruto | 1`',
+        ephemeral: true
+      });
       return;
     }
-    pendingSetup.delete(interaction.user.id);
 
-    const rawW2    = interaction.fields.getTextInputValue('winners2').trim();
-    const rawDur   = interaction.fields.getTextInputValue('duration').trim();
-    const winners2 = clamp(parseInt(rawW2, 10) || 1, 1, 20);
-    const minutes  = parseInt(rawDur, 10);
+    const emoji1   = parts1[0];
+    const prize1   = parts1[1];
+    const winners1 = clamp(parseInt(parts1[2], 10) || 1, 1, 20);
 
+    const emoji2   = parts2[0];
+    const prize2   = parts2[1];
+    const winners2 = clamp(parseInt(parts2[2], 10) || 1, 1, 20);
+
+    const minutes = parseInt(rawDur, 10);
     if (isNaN(minutes) || minutes < 1 || minutes > 10080) {
-      await interaction.reply({ content: '⚠️ Duración inválida. Ingresa un número entre 1 y 10080.', ephemeral: true });
+      await interaction.reply({
+        content: '⚠️ Duración inválida. Ingresa un número entre 1 y 10080.',
+        ephemeral: true
+      });
       return;
     }
 
-    const { prize1, emoji1, winners1, prize2, emoji2 } = setup;
     const endsAt = new Date(Date.now() + minutes * 60 * 1000);
 
-    const embed = buildActiveEmbed({ prize1, emoji1, winners1, prize2, emoji2, winners2, endsAt });
+    const embed      = buildActiveEmbed({ prize1, emoji1, winners1, prize2, emoji2, winners2, endsAt });
     const components = buildButtons({ prize1, emoji1, prize2, emoji2, disabled: false });
 
     await interaction.reply({ content: '✅ ¡Giveaway creado!', ephemeral: true });
@@ -165,7 +171,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Clic en botón → inscribir ──────────────────
+  // ── Clic en botón → inscribir participante ──
   if (interaction.isButton()) {
     const gw = giveaways.get(interaction.message.id);
 
@@ -194,19 +200,19 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── /reroll ────────────────────────────────────
+  // ── /reroll ──
   if (interaction.isChatInputCommand() && interaction.commandName === 'reroll') {
     const msgId  = interaction.options.getString('message_id').trim();
-    const premio = interaction.options.getInteger('premio'); // 0=ambos 1=p1 2=p2
+    const premio = interaction.options.getInteger('premio');
 
     const gw = giveaways.get(msgId);
 
     if (!gw) {
-      await interaction.reply({ content: '⚠️ No encontré un giveaway con esa ID de mensaje.', ephemeral: true });
+      await interaction.reply({ content: '⚠️ No encontré un giveaway con esa ID.', ephemeral: true });
       return;
     }
     if (!gw.finished) {
-      await interaction.reply({ content: '⚠️ El giveaway todavía está activo, espera a que termine.', ephemeral: true });
+      await interaction.reply({ content: '⚠️ El giveaway todavía está activo.', ephemeral: true });
       return;
     }
 
@@ -257,7 +263,7 @@ async function endGiveaway(messageId) {
     let announcement = '🎊 **¡El giveaway ha terminado!**\n';
     announcement += fmtWinners(gw.emoji1, gw.prize1, gw.lastWinners1) + '\n';
     announcement += fmtWinners(gw.emoji2, gw.prize2, gw.lastWinners2);
-    announcement += `\n\n*¿El ganador no reclamó? Un admin puede usar \`/reroll message_id:${messageId} premio:Premio 1\`*`;
+    announcement += `\n\n*¿El ganador no reclamó? Usa \`/reroll message_id:${messageId}\`*`;
 
     await channel.send(announcement);
   } catch (err) {
@@ -266,7 +272,7 @@ async function endGiveaway(messageId) {
 }
 
 // ─────────────────────────────────────────────
-//  CONSTRUCTORES DE EMBEDS Y BOTONES
+//  CONSTRUCTORES
 // ─────────────────────────────────────────────
 function buildActiveEmbed({ prize1, emoji1, winners1, prize2, emoji2, winners2, endsAt }) {
   return new EmbedBuilder()
@@ -294,12 +300,8 @@ function buildActiveEmbed({ prize1, emoji1, winners1, prize2, emoji2, winners2, 
 }
 
 function buildFinishedEmbed(gw) {
-  const w1 = gw.lastWinners1.length
-    ? gw.lastWinners1.map(id => `<@${id}>`).join(', ')
-    : '😔 Sin participantes';
-  const w2 = gw.lastWinners2.length
-    ? gw.lastWinners2.map(id => `<@${id}>`).join(', ')
-    : '😔 Sin participantes';
+  const w1 = gw.lastWinners1.length ? gw.lastWinners1.map(id => `<@${id}>`).join(', ') : '😔 Sin participantes';
+  const w2 = gw.lastWinners2.length ? gw.lastWinners2.map(id => `<@${id}>`).join(', ') : '😔 Sin participantes';
 
   return new EmbedBuilder()
     .setTitle('🎊 ¡GIVEAWAY TERMINADO!')
