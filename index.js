@@ -237,7 +237,7 @@ client.on('interactionCreate', async (interaction) => {
       const paid   = interaction.options.getString('paid');
 
       const text =
-        `𝜗𝜚﹒﹒　　**${user.username}** ◟  ͜⠀\n` +
+        `𝜗𝜚﹒﹒　　<@${user.id}> ◟  ͜⠀\n` +
         `　　　　　　 ⁺ . ♡ ⁺ .\n` +
         `𝜗𝜚 _bought_﹕ ${bought}\n` +
         `﹒ pa**id** wi**th**﹕ ${paid}\n` +
@@ -321,7 +321,7 @@ client.on('interactionCreate', async (interaction) => {
         content: '𝜗𝜚　**Giveaway** **!!**',
         embeds: [buildActiveGWEmbed({ prize, winners, endsAt, hostedBy })],
         components: [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('gw_enter').setLabel('🎉 Enter').setStyle(ButtonStyle.Primary)
+          new ButtonBuilder().setCustomId('gw_enter').setLabel('🎉 Enter').setStyle(ButtonStyle.Secondary)
         )]
       });
 
@@ -366,6 +366,12 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── SELECT MENU (queue status) ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('queue_')) {
+    // Solo admins
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      await interaction.reply({ content: '⚠️ You do not have permission to change the status.', ephemeral: true });
+      return;
+    }
+
     const msgId  = interaction.customId.replace('queue_', '');
     const status = interaction.values[0];
     const entry  = queueEntries.get(msgId);
@@ -373,7 +379,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const statusLabel = `**__${status}__**`;
     const text =
-      `𝜗𝜚﹒﹒　　**${entry.username}** ◟  ͜⠀\n` +
+      `𝜗𝜚﹒﹒　　<@${entry.userId}> ◟  ͜⠀\n` +
       `　　　　　　 ⁺ . ♡ ⁺ .\n` +
       `𝜗𝜚 _bought_﹕ ${entry.bought}\n` +
       `﹒ pa**id** wi**th**﹕ ${entry.paid}\n` +
@@ -407,6 +413,15 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: '⚠️ You are already entered!', ephemeral: true });
     } else {
       gw.participants.add(uid);
+      // Actualizar embed con nuevo conteo de participantes
+      try {
+        const updatedEmbed = buildActiveGWEmbed({
+          prize: gw.prize, winners: gw.winners,
+          endsAt: gw.endsAt, hostedBy: gw.hostedBy,
+          participantCount: gw.participants.size
+        });
+        await interaction.message.edit({ embeds: [updatedEmbed] });
+      } catch {}
       await interaction.reply({ content: `🎉 You entered for **${gw.prize}**! Good luck 🍀`, ephemeral: true });
     }
   }
@@ -415,11 +430,16 @@ client.on('interactionCreate', async (interaction) => {
 // ─────────────────────────────────────────────
 //  GIVEAWAY
 // ─────────────────────────────────────────────
-function buildActiveGWEmbed({ prize, winners, endsAt, hostedBy }) {
+function buildActiveGWEmbed({ prize, winners, endsAt, hostedBy, participantCount = 0 }) {
   const now = new Date();
   return new EmbedBuilder()
     .setColor(0xFFFFFF)
-    .setDescription(`**${prize}**\nEnd: <t:${Math.floor(endsAt.getTime() / 1000)}:R>\nHosted by <@${hostedBy}>`)
+    .setDescription(
+      `**${prize}**\n` +
+      `End: <t:${Math.floor(endsAt.getTime() / 1000)}:R>\n` +
+      `Hosted by <@${hostedBy}>\n` +
+      `Participants: ${participantCount}`
+    )
     .setFooter({ text: `${now.toLocaleDateString()} ${now.toLocaleTimeString()}` });
 }
 
@@ -444,7 +464,7 @@ async function endGiveaway(messageId) {
       content: '𝜗𝜚　**Giveaway** **!!**',
       embeds: [buildFinishedEmbed(gw)],
       components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('gw_enter').setLabel('🎉 Enter').setStyle(ButtonStyle.Primary).setDisabled(true)
+        new ButtonBuilder().setCustomId('gw_enter').setLabel('🎉 Enter').setStyle(ButtonStyle.Secondary).setDisabled(true)
       )]
     });
     if (gw.lastWinners.length) {
