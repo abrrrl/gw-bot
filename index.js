@@ -4,9 +4,51 @@ const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
   PermissionFlagsBits, StringSelectMenuBuilder, StringSelectMenuOptionBuilder
 } = require('discord.js');
-
+const Database = require('better-sqlite3');
 require('dotenv').config();
 
+// ─────────────────────────────────────────────
+//  DATABASE
+// ─────────────────────────────────────────────
+const db = new Database('data.db');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS autoresponders (
+    trigger TEXT PRIMARY KEY,
+    response TEXT NOT NULL,
+    delete_msg INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS sticky (
+    channel_id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    content TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS queue_entries (
+    message_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    bought TEXT NOT NULL,
+    paid TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS giveaways (
+    message_id TEXT PRIMARY KEY,
+    prize TEXT NOT NULL,
+    winners INTEGER NOT NULL,
+    ends_at INTEGER NOT NULL,
+    hosted_by TEXT NOT NULL,
+    claim_str TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    finished INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS giveaway_participants (
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+  );
+`);
+
+// ─────────────────────────────────────────────
+//  CLIENT
+// ─────────────────────────────────────────────
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -23,11 +65,6 @@ const QUEUE_CH   = '1291958364288450613';
 const MODMAIL_CH = '1500722506611294259';
 const GUILD_ID   = process.env.GUILD_ID;
 const CLIENT_ID  = process.env.CLIENT_ID;
-
-const autoresponders = new Map();
-const giveaways      = new Map();
-const stickyMessages = new Map();
-const queueEntries   = new Map(); // messageId → { user, bought, paid }
 
 // ─────────────────────────────────────────────
 //  REGISTRO DE COMANDOS
@@ -80,10 +117,27 @@ async function registerCommands() {
   } catch (err) { console.error('Error registering commands:', err); }
 }
 
+// ─────────────────────────────────────────────
+//  BOT LISTO — restaurar giveaways activos
+// ─────────────────────────────────────────────
 client.once('clientReady', () => {
   console.log(`✅ Bot connected as ${client.user.tag}`);
   registerCommands();
+  restoreGiveaways();
 });
+
+async function restoreGiveaways() {
+  const active = db.prepare('SELECT * FROM giveaways WHERE finished = 0').all();
+  for (const gw of active) {
+    const remaining = gw.ends_at - Date.now();
+    if (remaining <= 0) {
+      await endGiveaway(gw.message_id);
+    } else {
+      setTimeout(() => endGiveaway(gw.message_id), remaining);
+      console.log(`✅ Restored giveaway ${gw.message_id} — ends in ${Math.round(remaining / 1000)}s`);
+    }
+  }
+}
 
 // ─────────────────────────────────────────────
 //  MENSAJES
@@ -97,22 +151,17 @@ client.on('messageCreate', async (message) => {
       const guild = await client.guilds.fetch(GUILD_ID);
       const ch    = await guild.channels.fetch(MODMAIL_CH);
       const now   = new Date();
-
       const embed = new EmbedBuilder()
         .setColor(0xFFFFFF)
         .addFields(
-          { name: 'User', value: `${message.author.tag}`, inline: true },
-          { name: 'ID',   value: `\`${message.author.id}\``, inline: true },
+          { name: 'User',    value: `${message.author.tag}`, inline: true },
+          { name: 'ID',      value: `\`${message.author.id}\``, inline: true },
           { name: 'Message', value: message.content || '*No text*', inline: false }
         )
         .setFooter({ text: `${now.toLocaleDateString()} ${now.toLocaleTimeString()}` });
-
       await ch.send({ embeds: [embed] });
-
-      const confirm = new EmbedBuilder()
-        .setColor(0xFFFFFF)
+      const confirm = new EmbedBuilder().setColor(0xFFFFFF)
         .setDescription(`your message has been received, we'll get back to you shortly 🤍`);
-
       await message.author.send({ embeds: [confirm] });
     } catch (err) { console.error('Modmail DM error:', err); }
     return;
@@ -132,40 +181,36 @@ client.on('messageCreate', async (message) => {
       await handleReply(message.channel, message.author, targetId, response);
       return;
     }
-
     if (command === 'ar') {
       const sub = args.shift();
       if (sub === 'list')   { await listAR(message); return; }
       if (sub === 'delete') { await deleteAR(message, args.join(' ')); return; }
-      if (sub === 'add' || sub === 'edit') {
-        await message.reply('⚠️ Use the slash command `/ar add` or `/ar edit` instead.');
-        return;
-      }
+      if (sub === 'add' || sub === 'edit') { await message.reply('⚠️ Use `/ar add` or `/ar edit` instead.'); return; }
     }
-
     if (command === 'sticky') {
       const sub = args.shift();
       if (sub === 'remove') { await removeSticky(message.channel, message); return; }
-      if (sub === 'set') { await message.reply('⚠️ Use `/sticky set` instead.'); return; }
+      if (sub === 'set')    { await message.reply('⚠️ Use `/sticky set` instead.'); return; }
     }
   }
 
-  // Autoresponders
+  // Autoresponders desde DB
   const lower = content.toLowerCase();
-  for (const [trigger, data] of autoresponders) {
-    if (lower.includes(trigger.toLowerCase())) {
-      if (data.deleteMsg) { try { await message.delete(); } catch {} }
-      await message.channel.send(data.response);
+  const ars   = db.prepare('SELECT * FROM autoresponders').all();
+  for (const ar of ars) {
+    if (lower.includes(ar.trigger)) {
+      if (ar.delete_msg) { try { await message.delete(); } catch {} }
+      await message.channel.send(ar.response);
       break;
     }
   }
 
-  // Sticky
-  if (stickyMessages.has(message.channel.id)) {
-    const sticky = stickyMessages.get(message.channel.id);
-    try { const old = await message.channel.messages.fetch(sticky.messageId); await old.delete(); } catch {}
+  // Sticky desde DB
+  const sticky = db.prepare('SELECT * FROM sticky WHERE channel_id = ?').get(message.channel.id);
+  if (sticky) {
+    try { const old = await message.channel.messages.fetch(sticky.message_id); await old.delete(); } catch {}
     const sent = await message.channel.send(sticky.content);
-    sticky.messageId = sent.id;
+    db.prepare('UPDATE sticky SET message_id = ? WHERE channel_id = ?').run(sent.id, message.channel.id);
   }
 });
 
@@ -184,11 +229,11 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'delete') { await deleteARSlash(interaction, interaction.options.getString('trigger')); return; }
       if (sub === 'add' || sub === 'edit') {
         const trigger  = sub === 'edit' ? interaction.options.getString('trigger') : '';
-        const existing = trigger ? autoresponders.get(trigger.toLowerCase()) : null;
+        const existing = trigger ? db.prepare('SELECT * FROM autoresponders WHERE trigger = ?').get(trigger.toLowerCase()) : null;
         const modal    = new ModalBuilder().setCustomId(`ar_modal_${sub}`).setTitle(sub === 'add' ? 'Add Autoresponder' : 'Edit Autoresponder');
         const ti = new TextInputBuilder().setCustomId('ar_trigger').setLabel('Trigger word/phrase').setStyle(TextInputStyle.Short).setRequired(true);
         const ri = new TextInputBuilder().setCustomId('ar_response').setLabel('Response').setStyle(TextInputStyle.Paragraph).setRequired(true);
-        const di = new TextInputBuilder().setCustomId('ar_delete').setLabel('Delete trigger message? (yes/no)').setStyle(TextInputStyle.Short).setRequired(true).setValue(existing?.deleteMsg ? 'yes' : 'no');
+        const di = new TextInputBuilder().setCustomId('ar_delete').setLabel('Delete trigger message? (yes/no)').setStyle(TextInputStyle.Short).setRequired(true).setValue(existing?.delete_msg ? 'yes' : 'no');
         if (trigger) ti.setValue(trigger);
         if (existing) ri.setValue(existing.response);
         modal.addComponents(mrow(ti), mrow(ri), mrow(di));
@@ -197,14 +242,14 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    // /giveaway → UN SOLO MODAL de 5 campos
+    // /giveaway
     if (commandName === 'giveaway') {
       const modal = new ModalBuilder().setCustomId('gw_modal').setTitle('Giveaway Setup');
       modal.addComponents(
-        mrow(minput('prize',     'Prize',                              'Prize name',            100)),
-        mrow(minput('winners',   'Number of winners (max 10)',         '1',                       2)),
-        mrow(minput('duration',  'Duration in minutes (min 0.5, max 23040)', 'e.g. 60',           6)),
-        mrow(minput('claimtime', 'Claim time in minutes (min 0.17, max 60)', 'e.g. 5',            4))
+        mrow(minput('prize',     'Prize',                                    'Prize name',  100)),
+        mrow(minput('winners',   'Number of winners (max 10)',               '1',             2)),
+        mrow(minput('duration',  'Duration in minutes (min 0.5, max 23040)', 'e.g. 60',       6)),
+        mrow(minput('claimtime', 'Claim time in minutes (min 0.17, max 60)', 'e.g. 5',        4))
       );
       await interaction.showModal(modal);
       return;
@@ -213,17 +258,19 @@ client.on('interactionCreate', async (interaction) => {
     // /reroll
     if (commandName === 'reroll') {
       const msgId = interaction.options.getString('message_id').trim();
-      const gw    = giveaways.get(msgId);
+      const gw    = db.prepare('SELECT * FROM giveaways WHERE message_id = ?').get(msgId);
       if (!gw)          { await interaction.reply({ content: '⚠️ Giveaway not found.', ephemeral: true }); return; }
       if (!gw.finished) { await interaction.reply({ content: '⚠️ Giveaway still active.', ephemeral: true }); return; }
 
-      gw.lastWinners = pickMultiple(gw.participants, gw.winners);
+      const participants = db.prepare('SELECT user_id FROM giveaway_participants WHERE message_id = ?').all(msgId).map(r => r.user_id);
+      const winners      = pickMultiple(new Set(participants), gw.winners);
+
       try {
-        const ch  = await client.channels.fetch(gw.channelId);
+        const ch  = await client.channels.fetch(gw.channel_id);
         const msg = await ch.messages.fetch(msgId);
-        await msg.edit({ embeds: [buildFinishedEmbed(gw)] });
-        const txt = gw.lastWinners.length
-          ? `🔄 **Re-roll!** → ${gw.lastWinners.map(id => `<@${id}>`).join(', ')} 🎉`
+        await msg.edit({ embeds: [buildFinishedEmbed(gw, winners, participants.length)] });
+        const txt = winners.length
+          ? `🔄 **Re-roll!** → ${winners.map(id => `<@${id}>`).join(', ')} 🎉`
           : '🔄 **Re-roll!** → No participants';
         await interaction.reply({ content: txt });
       } catch { await interaction.reply({ content: '⚠️ Could not edit message.', ephemeral: true }); }
@@ -247,18 +294,9 @@ client.on('interactionCreate', async (interaction) => {
       try {
         const ch  = await client.channels.fetch(QUEUE_CH);
         const msg = await ch.send(text);
-
-        const select = new StringSelectMenuBuilder()
-          .setCustomId(`queue_${msg.id}`)
-          .setPlaceholder('Change status')
-          .addOptions(
-            new StringSelectMenuOptionBuilder().setLabel('Ongoing').setValue('ongoing'),
-            new StringSelectMenuOptionBuilder().setLabel('Noted').setValue('noted'),
-            new StringSelectMenuOptionBuilder().setLabel('Done').setValue('done')
-          );
-
+        const select = buildQueueSelect(msg.id);
         await msg.edit({ components: [new ActionRowBuilder().addComponents(select)] });
-        queueEntries.set(msg.id, { userId: user.id, username: user.username, bought, paid });
+        db.prepare('INSERT INTO queue_entries (message_id, user_id, bought, paid) VALUES (?, ?, ?, ?)').run(msg.id, user.id, bought, paid);
         await interaction.reply({ content: '✅ Queue entry added.', ephemeral: true });
       } catch (err) {
         console.error('Queue error:', err);
@@ -276,17 +314,12 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.showModal(modal);
         return;
       }
-      if (sub === 'remove') {
-        await removeSticky(interaction.channel, null, interaction);
-        return;
-      }
+      if (sub === 'remove') { await removeSticky(interaction.channel, null, interaction); return; }
     }
 
     // /reply
     if (commandName === 'reply') {
-      const targetId = interaction.options.getString('userid');
-      const response = interaction.options.getString('message');
-      await handleReply(null, interaction.user, targetId, response, interaction);
+      await handleReply(null, interaction.user, interaction.options.getString('userid'), interaction.options.getString('message'), interaction);
       return;
     }
   }
@@ -311,7 +344,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: '⚠️ Invalid claim time. Min 0.17 (10s), max 60 minutes.', ephemeral: true }); return;
       }
 
-      const endsAt   = new Date(Date.now() + minutes * 60 * 1000);
+      const endsAt   = Date.now() + minutes * 60 * 1000;
       const hostedBy = interaction.user.id;
       const claimStr = claimMins < 1 ? `${Math.round(claimMins * 60)}s` : `${claimMins}m`;
 
@@ -319,20 +352,14 @@ client.on('interactionCreate', async (interaction) => {
 
       const msg = await interaction.channel.send({
         content: '𝜗𝜚　**Giveaway** **!!**',
-        embeds: [buildActiveGWEmbed({ prize, winners, endsAt, hostedBy })],
+        embeds: [buildActiveGWEmbed({ prize, winners, endsAt, hostedBy, participantCount: 0 })],
         components: [new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('gw_enter').setLabel('🎉 Enter').setStyle(ButtonStyle.Secondary)
         )]
       });
 
-      giveaways.set(msg.id, {
-        prize, winners, endsAt, hostedBy, claimStr,
-        channelId: interaction.channel.id,
-        messageId: msg.id,
-        participants: new Set(),
-        lastWinners: [],
-        finished: false
-      });
+      db.prepare('INSERT INTO giveaways (message_id, prize, winners, ends_at, hosted_by, claim_str, channel_id, finished) VALUES (?, ?, ?, ?, ?, ?, ?, 0)')
+        .run(msg.id, prize, winners, endsAt, hostedBy, claimStr, interaction.channel.id);
 
       setTimeout(() => endGiveaway(msg.id), minutes * 60 * 1000);
       return;
@@ -342,12 +369,13 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.customId.startsWith('sticky_modal_')) {
       const channelId = interaction.customId.replace('sticky_modal_', '');
       const content   = interaction.fields.getTextInputValue('sticky_content');
-      if (stickyMessages.has(channelId)) {
-        const old = stickyMessages.get(channelId);
-        try { const m = await interaction.channel.messages.fetch(old.messageId); await m.delete(); } catch {}
+      const existing  = db.prepare('SELECT * FROM sticky WHERE channel_id = ?').get(channelId);
+      if (existing) {
+        try { const m = await interaction.channel.messages.fetch(existing.message_id); await m.delete(); } catch {}
+        db.prepare('DELETE FROM sticky WHERE channel_id = ?').run(channelId);
       }
       const sent = await interaction.channel.send(content);
-      stickyMessages.set(channelId, { messageId: sent.id, content });
+      db.prepare('INSERT INTO sticky (channel_id, message_id, content) VALUES (?, ?, ?)').run(channelId, sent.id, content);
       await interaction.reply({ content: '✅ Sticky set.', ephemeral: true });
       return;
     }
@@ -356,8 +384,8 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.customId.startsWith('ar_modal_')) {
       const trigger  = interaction.fields.getTextInputValue('ar_trigger').trim().toLowerCase();
       const response = interaction.fields.getTextInputValue('ar_response').trim();
-      const delMsg   = interaction.fields.getTextInputValue('ar_delete').trim().toLowerCase() === 'yes';
-      autoresponders.set(trigger, { response, deleteMsg: delMsg });
+      const delMsg   = interaction.fields.getTextInputValue('ar_delete').trim().toLowerCase() === 'yes' ? 1 : 0;
+      db.prepare('INSERT OR REPLACE INTO autoresponders (trigger, response, delete_msg) VALUES (?, ?, ?)').run(trigger, response, delMsg);
       const mode = interaction.customId.includes('edit') ? 'updated' : 'added';
       await interaction.reply({ content: `✅ Autoresponder \`${trigger}\` ${mode}.`, ephemeral: true });
       return;
@@ -366,7 +394,6 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── SELECT MENU (queue status) ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('queue_')) {
-    // Solo admins
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
       await interaction.reply({ content: '⚠️ You do not have permission to change the status.', ephemeral: true });
       return;
@@ -374,31 +401,21 @@ client.on('interactionCreate', async (interaction) => {
 
     const msgId  = interaction.customId.replace('queue_', '');
     const status = interaction.values[0];
-    const entry  = queueEntries.get(msgId);
+    const entry  = db.prepare('SELECT * FROM queue_entries WHERE message_id = ?').get(msgId);
     if (!entry) { await interaction.reply({ content: '⚠️ Queue entry not found.', ephemeral: true }); return; }
 
-    const statusLabel = `**__${status}__**`;
     const text =
-      `𝜗𝜚﹒﹒　　<@${entry.userId}> ◟  ͜⠀\n` +
+      `𝜗𝜚﹒﹒　　<@${entry.user_id}> ◟  ͜⠀\n` +
       `　　　　　　 ⁺ . ♡ ⁺ .\n` +
       `𝜗𝜚 _bought_﹕ ${entry.bought}\n` +
       `﹒ pa**id** wi**th**﹕ ${entry.paid}\n` +
-      `𝜗𝜚 _status_﹕ ${statusLabel}\n` +
+      `𝜗𝜚 _status_﹕ **__${status}__**\n` +
       `　　　　　　 ⁺ . ♡ ⁺ .`;
-
-    const select = new StringSelectMenuBuilder()
-      .setCustomId(`queue_${msgId}`)
-      .setPlaceholder('Change status')
-      .addOptions(
-        new StringSelectMenuOptionBuilder().setLabel('Ongoing').setValue('ongoing'),
-        new StringSelectMenuOptionBuilder().setLabel('Noted').setValue('noted'),
-        new StringSelectMenuOptionBuilder().setLabel('Done').setValue('done')
-      );
 
     try {
       const ch  = await client.channels.fetch(QUEUE_CH);
       const msg = await ch.messages.fetch(msgId);
-      await msg.edit({ content: text, components: [new ActionRowBuilder().addComponents(select)] });
+      await msg.edit({ content: text, components: [new ActionRowBuilder().addComponents(buildQueueSelect(msgId))] });
       await interaction.reply({ content: `✅ Status updated to **${status}**.`, ephemeral: true });
     } catch { await interaction.reply({ content: '⚠️ Could not update.', ephemeral: true }); }
     return;
@@ -406,21 +423,17 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── BUTTON (giveaway enter) ──
   if (interaction.isButton() && interaction.customId === 'gw_enter') {
-    const gw = giveaways.get(interaction.message.id);
+    const gw = db.prepare('SELECT * FROM giveaways WHERE message_id = ?').get(interaction.message.id);
     if (!gw || gw.finished) { await interaction.reply({ content: '⚠️ This giveaway has ended.', ephemeral: true }); return; }
-    const uid = interaction.user.id;
-    if (gw.participants.has(uid)) {
+    const uid      = interaction.user.id;
+    const existing = db.prepare('SELECT 1 FROM giveaway_participants WHERE message_id = ? AND user_id = ?').get(gw.message_id, uid);
+    if (existing) {
       await interaction.reply({ content: '⚠️ You are already entered!', ephemeral: true });
     } else {
-      gw.participants.add(uid);
-      // Actualizar embed con nuevo conteo de participantes
+      db.prepare('INSERT INTO giveaway_participants (message_id, user_id) VALUES (?, ?)').run(gw.message_id, uid);
+      const count = db.prepare('SELECT COUNT(*) as c FROM giveaway_participants WHERE message_id = ?').get(gw.message_id).c;
       try {
-        const updatedEmbed = buildActiveGWEmbed({
-          prize: gw.prize, winners: gw.winners,
-          endsAt: gw.endsAt, hostedBy: gw.hostedBy,
-          participantCount: gw.participants.size
-        });
-        await interaction.message.edit({ embeds: [updatedEmbed] });
+        await interaction.message.edit({ embeds: [buildActiveGWEmbed({ prize: gw.prize, winners: gw.winners, endsAt: gw.ends_at, hostedBy: gw.hosted_by, participantCount: count })] });
       } catch {}
       await interaction.reply({ content: `🎉 You entered for **${gw.prize}**! Good luck 🍀`, ephemeral: true });
     }
@@ -436,39 +449,48 @@ function buildActiveGWEmbed({ prize, winners, endsAt, hostedBy, participantCount
     .setColor(0xFFFFFF)
     .setDescription(
       `**${prize}**\n` +
-      `End: <t:${Math.floor(endsAt.getTime() / 1000)}:R>\n` +
+      `End: <t:${Math.floor(endsAt / 1000)}:R>\n` +
       `Hosted by <@${hostedBy}>\n` +
       `Participants: ${participantCount}`
     )
     .setFooter({ text: `${now.toLocaleDateString()} ${now.toLocaleTimeString()}` });
 }
 
-function buildFinishedEmbed(gw) {
-  const w   = gw.lastWinners.length ? gw.lastWinners.map(id => `<@${id}>`).join(', ') : 'No participants';
+function buildFinishedEmbed(gw, winners, participantCount) {
+  const w   = winners.length ? winners.map(id => `<@${id}>`).join(', ') : 'No participants';
   const now = new Date();
   return new EmbedBuilder()
     .setColor(0xFFFFFF)
-    .setDescription(`**${gw.prize}**\nWinner${gw.winners > 1 ? 's' : ''}: ${w}\nHosted by <@${gw.hostedBy}>`)
+    .setDescription(
+      `**${gw.prize}**\n` +
+      `Winner${gw.winners > 1 ? 's' : ''}: ${w}\n` +
+      `Hosted by <@${gw.hosted_by}>\n` +
+      `Participants: ${participantCount}`
+    )
     .setFooter({ text: `${now.toLocaleDateString()} ${now.toLocaleTimeString()}` });
 }
 
 async function endGiveaway(messageId) {
-  const gw = giveaways.get(messageId);
+  const gw = db.prepare('SELECT * FROM giveaways WHERE message_id = ?').get(messageId);
   if (!gw || gw.finished) return;
-  gw.finished    = true;
-  gw.lastWinners = pickMultiple(gw.participants, gw.winners);
+
+  db.prepare('UPDATE giveaways SET finished = 1 WHERE message_id = ?').run(messageId);
+
+  const participants = db.prepare('SELECT user_id FROM giveaway_participants WHERE message_id = ?').all(messageId).map(r => r.user_id);
+  const winners      = pickMultiple(new Set(participants), gw.winners);
+
   try {
-    const ch  = await client.channels.fetch(gw.channelId);
+    const ch  = await client.channels.fetch(gw.channel_id);
     const msg = await ch.messages.fetch(messageId);
     await msg.edit({
       content: '𝜗𝜚　**Giveaway** **!!**',
-      embeds: [buildFinishedEmbed(gw)],
+      embeds: [buildFinishedEmbed(gw, winners, participants.length)],
       components: [new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('gw_enter').setLabel('🎉 Enter').setStyle(ButtonStyle.Secondary).setDisabled(true)
       )]
     });
-    if (gw.lastWinners.length) {
-      await ch.send(`ೀ. . .﹒ congratulation's ${gw.lastWinners.map(id => `<@${id}>`).join(', ')} **!!**, you won **(${gw.prize})**. You have ${gw.claimStr} to claim.\n-# claim in tickets`);
+    if (winners.length) {
+      await ch.send(`ೀ. . .﹒ congratulation's ${winners.map(id => `<@${id}>`).join(', ')} **!!**, you won **(${gw.prize})**. You have ${gw.claim_str} to claim.\n-# claim in tickets`);
     } else {
       await ch.send(`No one entered the giveaway for **${gw.prize}**. 😔`);
     }
@@ -482,19 +504,13 @@ async function handleReply(channel, sender, targetId, response, interaction = nu
   try {
     const targetUser = await client.users.fetch(targetId);
     const now        = new Date();
-
-    const replyEmbed = new EmbedBuilder()
-      .setColor(0xFFFFFF)
+    const replyEmbed = new EmbedBuilder().setColor(0xFFFFFF)
       .setDescription(`"${response}"`)
       .setFooter({ text: `sent by ${sender.tag} · ${now.toLocaleDateString()} ${now.toLocaleTimeString()}` });
-
-    const followup = new EmbedBuilder()
-      .setColor(0xFFFFFF)
+    const followup = new EmbedBuilder().setColor(0xFFFFFF)
       .setDescription(`-# if your question wasn't resolved or you need anything else, feel free to message again or open a ticket in the server.`);
-
     await targetUser.send({ embeds: [replyEmbed] });
     await targetUser.send({ embeds: [followup] });
-
     const confirm = new EmbedBuilder().setColor(0xFFFFFF).setDescription(`✅ Reply sent to **${targetUser.tag}**.`);
     if (interaction) await interaction.reply({ embeds: [confirm], ephemeral: true });
     else await channel.send({ embeds: [confirm] });
@@ -509,38 +525,33 @@ async function handleReply(channel, sender, targetId, response, interaction = nu
 //  AR HELPERS
 // ─────────────────────────────────────────────
 async function listAR(message) {
-  if (autoresponders.size === 0) { await message.reply('⚠️ No autoresponders set.'); return; }
-  const list = [...autoresponders.keys()].map((t, i) => `${i + 1}. \`${t}\``).join('\n');
-  await message.reply(`**Autoresponders:**\n${list}`);
+  const ars = db.prepare('SELECT trigger FROM autoresponders').all();
+  if (!ars.length) { await message.reply('⚠️ No autoresponders set.'); return; }
+  await message.reply(`**Autoresponders:**\n${ars.map((a, i) => `${i + 1}. \`${a.trigger}\``).join('\n')}`);
 }
-
 async function listARSlash(interaction) {
-  if (autoresponders.size === 0) { await interaction.reply({ content: '⚠️ No autoresponders set.', ephemeral: true }); return; }
-  const list = [...autoresponders.keys()].map((t, i) => `${i + 1}. \`${t}\``).join('\n');
-  await interaction.reply({ content: `**Autoresponders:**\n${list}`, ephemeral: true });
+  const ars = db.prepare('SELECT trigger FROM autoresponders').all();
+  if (!ars.length) { await interaction.reply({ content: '⚠️ No autoresponders set.', ephemeral: true }); return; }
+  await interaction.reply({ content: `**Autoresponders:**\n${ars.map((a, i) => `${i + 1}. \`${a.trigger}\``).join('\n')}`, ephemeral: true });
 }
-
 async function deleteAR(message, trigger) {
   if (!trigger) { await message.reply('⚠️ Provide a trigger.'); return; }
-  autoresponders.delete(trigger.toLowerCase())
-    ? await message.reply(`✅ Deleted \`${trigger}\`.`)
-    : await message.reply(`⚠️ Trigger \`${trigger}\` not found.`);
+  const changes = db.prepare('DELETE FROM autoresponders WHERE trigger = ?').run(trigger.toLowerCase()).changes;
+  await message.reply(changes ? `✅ Deleted \`${trigger}\`.` : `⚠️ Trigger \`${trigger}\` not found.`);
 }
-
 async function deleteARSlash(interaction, trigger) {
-  autoresponders.delete(trigger.toLowerCase())
-    ? await interaction.reply({ content: `✅ Deleted \`${trigger}\`.`, ephemeral: true })
-    : await interaction.reply({ content: `⚠️ Trigger \`${trigger}\` not found.`, ephemeral: true });
+  const changes = db.prepare('DELETE FROM autoresponders WHERE trigger = ?').run(trigger.toLowerCase()).changes;
+  await interaction.reply({ content: changes ? `✅ Deleted \`${trigger}\`.` : `⚠️ Trigger \`${trigger}\` not found.`, ephemeral: true });
 }
 
 // ─────────────────────────────────────────────
 //  STICKY HELPERS
 // ─────────────────────────────────────────────
 async function removeSticky(channel, message = null, interaction = null) {
-  if (stickyMessages.has(channel.id)) {
-    const sticky = stickyMessages.get(channel.id);
-    try { const m = await channel.messages.fetch(sticky.messageId); await m.delete(); } catch {}
-    stickyMessages.delete(channel.id);
+  const sticky = db.prepare('SELECT * FROM sticky WHERE channel_id = ?').get(channel.id);
+  if (sticky) {
+    try { const m = await channel.messages.fetch(sticky.message_id); await m.delete(); } catch {}
+    db.prepare('DELETE FROM sticky WHERE channel_id = ?').run(channel.id);
     if (interaction) await interaction.reply({ content: '✅ Sticky removed.', ephemeral: true });
     else await message.reply('✅ Sticky removed.');
   } else {
@@ -552,6 +563,17 @@ async function removeSticky(channel, message = null, interaction = null) {
 // ─────────────────────────────────────────────
 //  UTILIDADES
 // ─────────────────────────────────────────────
+function buildQueueSelect(msgId) {
+  return new StringSelectMenuBuilder()
+    .setCustomId(`queue_${msgId}`)
+    .setPlaceholder('Change status')
+    .addOptions(
+      new StringSelectMenuOptionBuilder().setLabel('Ongoing').setValue('ongoing'),
+      new StringSelectMenuOptionBuilder().setLabel('Noted').setValue('noted'),
+      new StringSelectMenuOptionBuilder().setLabel('Done').setValue('done')
+    );
+}
+
 function pickMultiple(set, count) {
   if (!set || set.size === 0) return [];
   const pool = [...set], result = [];
