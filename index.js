@@ -72,7 +72,10 @@ db.exec(`
 const PREFIX      = '!';
 const GUILD_BOTS  = process.env.GUILD_ID;
 const GUILD_MAIN  = '1502429738868670484';
+const GUILD_THREE = '1362542479483605192';
 const QUEUE_CH    = '1291958364288450613';
+const QUEUE_CH_THREE = '1362542480087716003';
+const QUEUE_CHANNELS = { [GUILD_BOTS]: QUEUE_CH, [GUILD_THREE]: QUEUE_CH_THREE };
 const MODMAIL_CH  = '1500722506611294259';
 const MODMAIL_NEW = '1502740755389616168';
 const LEVEL_CH    = '1502720841287209132';
@@ -174,7 +177,7 @@ async function registerCommands() {
   ];
 
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-  for (const guildId of [GUILD_BOTS, GUILD_MAIN]) {
+  for (const guildId of [GUILD_BOTS, GUILD_MAIN, GUILD_THREE]) {
     try {
       await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands.map(c => c.toJSON()) });
       console.log(`✅ Commands registered in guild ${guildId}`);
@@ -211,7 +214,7 @@ client.on('guildMemberAdd', async (member) => {
   // Default nickname on join in main server
   if (member.guild.id === GUILD_MAIN) {
     try {
-      await member.setNickname(`✾﹒﹒${member.user.username}`);
+      await member.setNickname(`✾﹒﹒${member.user.username}`.slice(0, 32));
     } catch (err) { console.error('Nickname error on join:', err); }
   }
 
@@ -374,7 +377,7 @@ async function handleLevelUp(member, level) {
 
       const prefix = LEVEL_NICKS[level][gender];
       if (prefix) {
-        try { await member.setNickname(`${prefix}${member.user.username}`); } catch {}
+        try { await member.setNickname(`${prefix}${member.user.username}`.slice(0, 32)); } catch {}
       }
     }
   }
@@ -430,8 +433,8 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'reroll') {
       const msgId = interaction.options.getString('message_id').trim();
       const gw    = db.prepare('SELECT * FROM giveaways WHERE message_id = ?').get(msgId);
-      if (!gw)          { await interaction.reply({ content: '⚠️ Giveaway not found.', ephemeral: true }); return; }
-      if (!gw.finished) { await interaction.reply({ content: '⚠️ Giveaway is still active.', ephemeral: true }); return; }
+      if (!gw)          { await interaction.reply({ content: '⚠️ Giveaway not found.', flags: 64 }); return; }
+      if (!gw.finished) { await interaction.reply({ content: '⚠️ Giveaway is still active.', flags: 64 }); return; }
 
       const participants = db.prepare('SELECT user_id, entries FROM giveaway_participants WHERE message_id = ?').all(msgId);
       const pool         = buildPool(participants);
@@ -446,7 +449,7 @@ client.on('interactionCreate', async (interaction) => {
           ? `🔄 **Re-roll!** → ${winners.map(id => `<@${id}>`).join(', ')} 🎉`
           : '🔄 **Re-roll!** → No participants';
         await interaction.reply({ content: txt });
-      } catch { await interaction.reply({ content: '⚠️ Could not edit message.', ephemeral: true }); }
+      } catch { await interaction.reply({ content: '⚠️ Could not edit message.', flags: 64 }); }
       return;
     }
 
@@ -456,14 +459,15 @@ client.on('interactionCreate', async (interaction) => {
       const bought = interaction.options.getString('bought');
       const paid   = interaction.options.getString('paid');
       try {
-        const ch  = await client.channels.fetch(QUEUE_CH);
+        const queueChId = QUEUE_CHANNELS[interaction.guild?.id] || QUEUE_CH;
+        const ch  = await client.channels.fetch(queueChId);
         const msg = await ch.send(buildQueueText(user.id, bought, paid, 'ongoing'));
         await msg.edit({ components: [new ActionRowBuilder().addComponents(buildQueueSelect(msg.id))] });
         db.prepare('INSERT INTO queue_entries (message_id, user_id, bought, paid) VALUES (?, ?, ?, ?)').run(msg.id, user.id, bought, paid);
-        await interaction.reply({ content: '✅ Queue entry added.', ephemeral: true });
+        await interaction.reply({ content: '✅ Queue entry added.', flags: 64 });
       } catch (err) {
         console.error('Queue error:', err);
-        await interaction.reply({ content: '⚠️ Could not send queue entry.', ephemeral: true });
+        await interaction.reply({ content: '⚠️ Could not send queue entry.', flags: 64 });
       }
       return;
     }
@@ -507,7 +511,7 @@ client.on('interactionCreate', async (interaction) => {
           await handleLevelUp(member, newLevel);
         } catch {}
       }
-      await interaction.reply({ content: `✅ Added **${amount} XP** to ${user.tag}. Total: **${newXP} XP** (Level ${newLevel})`, ephemeral: true });
+      await interaction.reply({ content: `✅ Added **${amount} XP** to ${user.tag}. Total: **${newXP} XP** (Level ${newLevel})`, flags: 64 });
       return;
     }
 
@@ -515,7 +519,7 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'level') {
       const target = interaction.options.getUser('user') || interaction.user;
       const data   = db.prepare('SELECT * FROM levels WHERE guild_id = ? AND user_id = ?').get(GUILD_MAIN, target.id);
-      if (!data) { await interaction.reply({ content: `${target.tag} has no XP yet.`, ephemeral: true }); return; }
+      if (!data) { await interaction.reply({ content: `${target.tag} has no XP yet.`, flags: 64 }); return; }
       const nextXP = xpForLevel(data.level + 1);
       const embed  = new EmbedBuilder().setColor(0xFFFFFF)
         .setTitle(`${target.username}'s level`)
@@ -523,7 +527,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Level', value: `${data.level}`, inline: true },
           { name: 'XP',    value: `${data.xp} / ${nextXP}`, inline: true }
         );
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: 64 });
       return;
     }
 
@@ -531,7 +535,7 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'addpingjoin') {
       const channel = interaction.options.getChannel('channel');
       db.prepare('INSERT OR IGNORE INTO ping_on_join (guild_id, channel_id) VALUES (?, ?)').run(interaction.guild.id, channel.id);
-      await interaction.reply({ content: `✅ Added <#${channel.id}> to ping-on-join channels.`, ephemeral: true });
+      await interaction.reply({ content: `✅ Added <#${channel.id}> to ping-on-join channels.`, flags: 64 });
       return;
     }
 
@@ -539,15 +543,15 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'removepingjoin') {
       const channel = interaction.options.getChannel('channel');
       db.prepare('DELETE FROM ping_on_join WHERE guild_id = ? AND channel_id = ?').run(interaction.guild.id, channel.id);
-      await interaction.reply({ content: `✅ Removed <#${channel.id}> from ping-on-join channels.`, ephemeral: true });
+      await interaction.reply({ content: `✅ Removed <#${channel.id}> from ping-on-join channels.`, flags: 64 });
       return;
     }
 
     // /listpingjoin
     if (cmd === 'listpingjoin') {
       const rows = db.prepare('SELECT channel_id FROM ping_on_join WHERE guild_id = ?').all(interaction.guild.id);
-      if (!rows.length) { await interaction.reply({ content: '⚠️ No ping-on-join channels set.', ephemeral: true }); return; }
-      await interaction.reply({ content: `**Ping-on-join channels:**\n${rows.map(r => `<#${r.channel_id}>`).join('\n')}`, ephemeral: true });
+      if (!rows.length) { await interaction.reply({ content: '⚠️ No ping-on-join channels set.', flags: 64 }); return; }
+      await interaction.reply({ content: `**Ping-on-join channels:**\n${rows.map(r => `<#${r.channel_id}>`).join('\n')}`, flags: 64 });
       return;
     }
   }
@@ -567,10 +571,10 @@ client.on('interactionCreate', async (interaction) => {
       const claimMins = parseFloat(rawClaim);
 
       if (isNaN(minutes) || minutes < 0.5 || minutes > 23040) {
-        await interaction.reply({ content: '⚠️ Invalid duration. Min 0.5, max 23040 minutes.', ephemeral: true }); return;
+        await interaction.reply({ content: '⚠️ Invalid duration. Min 0.5, max 23040 minutes.', flags: 64 }); return;
       }
       if (isNaN(claimMins) || claimMins < 0.17 || claimMins > 60) {
-        await interaction.reply({ content: '⚠️ Invalid claim time. Min 0.17 (10s), max 60 minutes.', ephemeral: true }); return;
+        await interaction.reply({ content: '⚠️ Invalid claim time. Min 0.17 (10s), max 60 minutes.', flags: 64 }); return;
       }
 
       const bonusRoles = [];
@@ -586,7 +590,7 @@ client.on('interactionCreate', async (interaction) => {
       const claimStr = claimMins < 1 ? `${Math.round(claimMins * 60)}s` : `${claimMins}m`;
       const guildId  = interaction.guild?.id || GUILD_BOTS;
 
-      await interaction.reply({ content: '✅ Giveaway created!', ephemeral: true });
+      await interaction.reply({ content: '✅ Giveaway created!', flags: 64 });
 
       const msg = await interaction.channel.send({
         content: '𝜗𝜚　**Giveaway** **!!**',
@@ -614,7 +618,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       const sent = await interaction.channel.send(content);
       db.prepare('INSERT INTO sticky (channel_id, message_id, content) VALUES (?, ?, ?)').run(channelId, sent.id, content);
-      await interaction.reply({ content: '✅ Sticky set.', ephemeral: true });
+      await interaction.reply({ content: '✅ Sticky set.', flags: 64 });
       return;
     }
 
@@ -625,7 +629,7 @@ client.on('interactionCreate', async (interaction) => {
       const delMsg   = interaction.fields.getTextInputValue('ar_delete').trim().toLowerCase() === 'yes' ? 1 : 0;
       db.prepare('INSERT OR REPLACE INTO autoresponders (trigger, response, delete_msg) VALUES (?, ?, ?)').run(trigger, response, delMsg);
       const mode = interaction.customId.includes('edit') ? 'updated' : 'added';
-      await interaction.reply({ content: `✅ Autoresponder \`${trigger}\` ${mode}.`, ephemeral: true });
+      await interaction.reply({ content: `✅ Autoresponder \`${trigger}\` ${mode}.`, flags: 64 });
       return;
     }
   }
@@ -633,29 +637,30 @@ client.on('interactionCreate', async (interaction) => {
   // ── SELECT MENU — queue status ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('queue_')) {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
-      await interaction.reply({ content: '⚠️ No permission.', ephemeral: true }); return;
+      await interaction.reply({ content: '⚠️ No permission.', flags: 64 }); return;
     }
     const msgId  = interaction.customId.replace('queue_', '');
     const status = interaction.values[0];
     const entry  = db.prepare('SELECT * FROM queue_entries WHERE message_id = ?').get(msgId);
-    if (!entry) { await interaction.reply({ content: '⚠️ Queue entry not found.', ephemeral: true }); return; }
+    if (!entry) { await interaction.reply({ content: '⚠️ Queue entry not found.', flags: 64 }); return; }
     try {
-      const ch  = await client.channels.fetch(QUEUE_CH);
+      const queueChId = QUEUE_CHANNELS[interaction.guild?.id] || QUEUE_CH;
+        const ch  = await client.channels.fetch(queueChId);
       const msg = await ch.messages.fetch(msgId);
       await msg.edit({ content: buildQueueText(entry.user_id, entry.bought, entry.paid, status), components: [new ActionRowBuilder().addComponents(buildQueueSelect(msgId))] });
-      await interaction.reply({ content: `✅ Status updated to **${status}**.`, ephemeral: true });
-    } catch { await interaction.reply({ content: '⚠️ Could not update.', ephemeral: true }); }
+      await interaction.reply({ content: `✅ Status updated to **${status}**.`, flags: 64 });
+    } catch { await interaction.reply({ content: '⚠️ Could not update.', flags: 64 }); }
     return;
   }
 
   // ── BUTTON — giveaway enter ──
   if (interaction.isButton() && interaction.customId === 'gw_enter') {
     const gw = db.prepare('SELECT * FROM giveaways WHERE message_id = ?').get(interaction.message.id);
-    if (!gw || gw.finished) { await interaction.reply({ content: '⚠️ This giveaway has ended.', ephemeral: true }); return; }
+    if (!gw || gw.finished) { await interaction.reply({ content: '⚠️ This giveaway has ended.', flags: 64 }); return; }
 
     const uid      = interaction.user.id;
     const existing = db.prepare('SELECT 1 FROM giveaway_participants WHERE message_id = ? AND user_id = ?').get(gw.message_id, uid);
-    if (existing)  { await interaction.reply({ content: '⚠️ You are already entered!', ephemeral: true }); return; }
+    if (existing)  { await interaction.reply({ content: '⚠️ You are already entered!', flags: 64 }); return; }
 
     const bonusRoles = JSON.parse(gw.bonus_roles || '[]');
     let entries = 1;
@@ -677,7 +682,7 @@ client.on('interactionCreate', async (interaction) => {
     } catch {}
 
     const entryTxt = entries > 1 ? ` with **${entries}x entries**` : '';
-    await interaction.reply({ content: `🎉 You entered for **${gw.prize}**${entryTxt}! Good luck 🍀`, ephemeral: true });
+    await interaction.reply({ content: `🎉 You entered for **${gw.prize}**${entryTxt}! Good luck 🍀`, flags: 64 });
   }
 });
 
@@ -758,11 +763,11 @@ async function handleReply(channel, sender, targetId, response, interaction = nu
     await targetUser.send({ embeds: [replyEmbed] });
     await targetUser.send({ embeds: [followup] });
     const confirm = new EmbedBuilder().setColor(0xFFFFFF).setDescription(`✅ Reply sent to **${targetUser.tag}**.`);
-    if (interaction) await interaction.reply({ embeds: [confirm], ephemeral: true });
+    if (interaction) await interaction.reply({ embeds: [confirm], flags: 64 });
     else await channel?.send({ embeds: [confirm] });
   } catch (err) {
     console.error('Reply error:', err);
-    if (interaction) await interaction.reply({ content: '⚠️ Could not send reply.', ephemeral: true });
+    if (interaction) await interaction.reply({ content: '⚠️ Could not send reply.', flags: 64 });
     else await channel?.send('⚠️ Could not send reply.');
   }
 }
@@ -777,8 +782,8 @@ async function listAR(message) {
 }
 async function listARSlash(interaction) {
   const ars = db.prepare('SELECT trigger FROM autoresponders').all();
-  if (!ars.length) { await interaction.reply({ content: '⚠️ No autoresponders set.', ephemeral: true }); return; }
-  await interaction.reply({ content: `**Autoresponders:**\n${ars.map((a, i) => `${i + 1}. \`${a.trigger}\``).join('\n')}`, ephemeral: true });
+  if (!ars.length) { await interaction.reply({ content: '⚠️ No autoresponders set.', flags: 64 }); return; }
+  await interaction.reply({ content: `**Autoresponders:**\n${ars.map((a, i) => `${i + 1}. \`${a.trigger}\``).join('\n')}`, flags: 64 });
 }
 async function deleteAR(message, trigger) {
   if (!trigger) { await message.reply('⚠️ Provide a trigger.'); return; }
@@ -787,7 +792,7 @@ async function deleteAR(message, trigger) {
 }
 async function deleteARSlash(interaction, trigger) {
   const c = db.prepare('DELETE FROM autoresponders WHERE trigger = ?').run(trigger.toLowerCase()).changes;
-  await interaction.reply({ content: c ? `✅ Deleted \`${trigger}\`.` : `⚠️ Not found.`, ephemeral: true });
+  await interaction.reply({ content: c ? `✅ Deleted \`${trigger}\`.` : `⚠️ Not found.`, flags: 64 });
 }
 
 // ─────────────────────────────────────────────
@@ -798,10 +803,10 @@ async function removeSticky(channel, message = null, interaction = null) {
   if (sticky) {
     try { const m = await channel.messages.fetch(sticky.message_id); await m.delete(); } catch {}
     db.prepare('DELETE FROM sticky WHERE channel_id = ?').run(channel.id);
-    if (interaction) await interaction.reply({ content: '✅ Sticky removed.', ephemeral: true });
+    if (interaction) await interaction.reply({ content: '✅ Sticky removed.', flags: 64 });
     else await message?.reply('✅ Sticky removed.');
   } else {
-    if (interaction) await interaction.reply({ content: '⚠️ No sticky in this channel.', ephemeral: true });
+    if (interaction) await interaction.reply({ content: '⚠️ No sticky in this channel.', flags: 64 });
     else await message?.reply('⚠️ No sticky in this channel.');
   }
 }
