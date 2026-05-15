@@ -36,33 +36,12 @@ db.exec(`
     hosted_by TEXT NOT NULL,
     claim_str TEXT NOT NULL,
     channel_id TEXT NOT NULL,
-    guild_id TEXT NOT NULL,
-    finished INTEGER NOT NULL DEFAULT 0,
-    bonus_roles TEXT NOT NULL DEFAULT '[]'
+    finished INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS giveaway_participants (
     message_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    entries INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (message_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS levels (
-    guild_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    xp INTEGER NOT NULL DEFAULT 0,
-    level INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (guild_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS xp_cooldown (
-    guild_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    last_xp INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS ping_on_join (
-    guild_id TEXT NOT NULL,
-    channel_id TEXT NOT NULL,
-    PRIMARY KEY (guild_id, channel_id)
   );
 `);
 
@@ -72,48 +51,10 @@ db.exec(`
 const PREFIX      = '!';
 const GUILD_BOTS  = process.env.GUILD_ID;
 const GUILD_MAIN  = '1502429738868670484';
-const GUILD_THREE = '1362542479483605192';
 const QUEUE_CH    = '1291958364288450613';
-const QUEUE_CH_THREE = '1362542480087716003';
-const QUEUE_CHANNELS = { [GUILD_BOTS]: QUEUE_CH, [GUILD_THREE]: QUEUE_CH_THREE };
 const MODMAIL_CH  = '1500722506611294259';
 const MODMAIL_NEW = '1502740755389616168';
-const LEVEL_CH    = '1502720841287209132';
 const CLIENT_ID   = process.env.CLIENT_ID;
-
-// XP curve — starts at 75, scales gradually
-function xpForLevel(level) {
-  return Math.floor(75 * Math.pow(level, 1.6) + 75);
-}
-
-// Gender role IDs
-const GENDER = {
-  female: '1502733305265651732',
-  male:   '1502733358625722629',
-  none:   '1502733406679863427',
-};
-
-// Level roles by gender
-const LEVEL_ROLES = {
-  5:  { all: '1502736896667680908' },
-  10: { female: '1502729343237885972', male: '1502729370618560712', none: '1502733201351643156' },
-  25: { female: '1502729399320182946', male: '1502729558514733207', none: '1502733088881643682' },
-  50: { female: '1502729613984403616', male: '1502729686470492232', none: '1502733262173376683' },
-};
-
-// Nickname prefixes by level and gender
-const LEVEL_NICKS = {
-  10: { female: '✾﹒﹒Lady﹒',                  male: '✾﹒﹒Lord﹒',                   none: '✾﹒﹒Lady/Lord﹒' },
-  25: { female: '✾﹒﹒Viscountess﹒',            male: '✾﹒﹒Viscount﹒',               none: '✾﹒﹒Viscountess/Viscount﹒' },
-  50: { female: '✾﹒﹒Duchess﹒',               male: '✾﹒﹒Duke﹒',                   none: '✾﹒﹒Duchess/Duke﹒' },
-};
-
-function getGender(member) {
-  if (member.roles.cache.has(GENDER.female)) return 'female';
-  if (member.roles.cache.has(GENDER.male))   return 'male';
-  if (member.roles.cache.has(GENDER.none))   return 'none';
-  return null;
-}
 
 // ─────────────────────────────────────────────
 //  CLIENT
@@ -159,29 +100,14 @@ async function registerCommands() {
     new SlashCommandBuilder().setName('reply').setDescription('Reply to a modmail message').setDefaultMemberPermissions(A)
       .addStringOption(o => o.setName('userid').setDescription('User ID').setRequired(true))
       .addStringOption(o => o.setName('message').setDescription('Your reply').setRequired(true)),
-
-    new SlashCommandBuilder().setName('addxp').setDescription('Add XP to a user').setDefaultMemberPermissions(A)
-      .addUserOption(o => o.setName('user').setDescription('User').setRequired(true))
-      .addIntegerOption(o => o.setName('amount').setDescription('Amount of XP').setRequired(true)),
-
-    new SlashCommandBuilder().setName('level').setDescription("Check a user's level")
-      .addUserOption(o => o.setName('user').setDescription('User (optional)')),
-
-    new SlashCommandBuilder().setName('addpingjoin').setDescription('Add a ping-on-join channel').setDefaultMemberPermissions(A)
-      .addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true)),
-
-    new SlashCommandBuilder().setName('removepingjoin').setDescription('Remove a ping-on-join channel').setDefaultMemberPermissions(A)
-      .addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true)),
-
-    new SlashCommandBuilder().setName('listpingjoin').setDescription('List all ping-on-join channels').setDefaultMemberPermissions(A),
   ];
 
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-  for (const guildId of [GUILD_BOTS, GUILD_MAIN, GUILD_THREE]) {
+  for (const guildId of [GUILD_BOTS, GUILD_MAIN]) {
     try {
       await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands.map(c => c.toJSON()) });
       console.log(`✅ Commands registered in guild ${guildId}`);
-    } catch (err) { console.error(`Error registering in ${guildId}:`, err); }
+    } catch (err) { console.error(`Error registering in ${guildId}:`, err.message); }
   }
 }
 
@@ -202,32 +128,10 @@ async function restoreGiveaways() {
       await endGiveaway(gw.message_id);
     } else {
       setTimeout(() => endGiveaway(gw.message_id), remaining);
-      console.log(`✅ Restored giveaway ${gw.message_id} — ends in ${Math.round(remaining / 1000)}s`);
+      console.log(`✅ Restored giveaway ${gw.message_id}`);
     }
   }
 }
-
-// ─────────────────────────────────────────────
-//  MEMBER JOIN
-// ─────────────────────────────────────────────
-client.on('guildMemberAdd', async (member) => {
-  // Default nickname on join in main server
-  if (member.guild.id === GUILD_MAIN) {
-    try {
-      await member.setNickname(`✾﹒﹒${member.user.username}`.slice(0, 32));
-    } catch (err) { console.error('Nickname error on join:', err); }
-  }
-
-  // Ping on join (ghost ping — sends then deletes)
-  const rows = db.prepare('SELECT channel_id FROM ping_on_join WHERE guild_id = ?').all(member.guild.id);
-  for (const row of rows) {
-    try {
-      const ch  = await client.channels.fetch(row.channel_id);
-      const msg = await ch.send(`<@${member.user.id}>`);
-      setTimeout(() => msg.delete().catch(() => {}), 3000);
-    } catch {}
-  }
-});
 
 // ─────────────────────────────────────────────
 //  MESSAGES
@@ -288,11 +192,6 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // XP — only in main server
-  if (message.guild?.id === GUILD_MAIN) {
-    await handleXP(message);
-  }
-
   // Autoresponders
   const lower = content.toLowerCase();
   const ars   = db.prepare('SELECT * FROM autoresponders').all();
@@ -314,81 +213,10 @@ client.on('messageCreate', async (message) => {
 });
 
 // ─────────────────────────────────────────────
-//  XP SYSTEM
-// ─────────────────────────────────────────────
-async function handleXP(message) {
-  const guildId = message.guild.id;
-  const userId  = message.author.id;
-  const now     = Date.now();
-
-  const cooldown = db.prepare('SELECT last_xp FROM xp_cooldown WHERE guild_id = ? AND user_id = ?').get(guildId, userId);
-  if (cooldown && now - cooldown.last_xp < 60000) return;
-
-  db.prepare('INSERT OR REPLACE INTO xp_cooldown (guild_id, user_id, last_xp) VALUES (?, ?, ?)').run(guildId, userId, now);
-
-  const xpGain = Math.floor(Math.random() * 11) + 15;
-
-  let data = db.prepare('SELECT * FROM levels WHERE guild_id = ? AND user_id = ?').get(guildId, userId);
-  if (!data) {
-    db.prepare('INSERT INTO levels (guild_id, user_id, xp, level) VALUES (?, ?, 0, 0)').run(guildId, userId);
-    data = { xp: 0, level: 0 };
-  }
-
-  const newXP    = data.xp + xpGain;
-  let   newLevel = data.level;
-  let   leveledUp = false;
-
-  while (newXP >= xpForLevel(newLevel + 1)) {
-    newLevel++;
-    leveledUp = true;
-  }
-
-  db.prepare('UPDATE levels SET xp = ?, level = ? WHERE guild_id = ? AND user_id = ?').run(newXP, newLevel, guildId, userId);
-
-  if (leveledUp) {
-    try {
-      const guild  = await client.guilds.fetch(GUILD_MAIN);
-      const member = await guild.members.fetch(userId);
-      await handleLevelUp(member, newLevel);
-    } catch (err) { console.error('Level up error:', err); }
-  }
-}
-
-async function handleLevelUp(member, level) {
-  const userId = member.user.id;
-
-  // Announce level up
-  try {
-    const ch = await client.channels.fetch(LEVEL_CH);
-    await ch.send(`🎉 <@${userId}> just reached **level ${level}**!`);
-  } catch {}
-
-  // Level 5 — give access role
-  if (level === 5) {
-    try { await member.roles.add(LEVEL_ROLES[5].all); } catch {}
-  }
-
-  // Levels 10, 25, 50 — give gender role and change nickname
-  if ([10, 25, 50].includes(level)) {
-    const gender = getGender(member);
-    if (gender) {
-      const roleId = LEVEL_ROLES[level][gender];
-      if (roleId) { try { await member.roles.add(roleId); } catch {} }
-
-      const prefix = LEVEL_NICKS[level][gender];
-      if (prefix) {
-        try { await member.setNickname(`${prefix}${member.user.username}`.slice(0, 32)); } catch {}
-      }
-    }
-  }
-}
-
-// ─────────────────────────────────────────────
 //  INTERACTIONS
 // ─────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // ── SLASH COMMANDS ──
   if (interaction.isChatInputCommand()) {
     const cmd = interaction.commandName;
 
@@ -419,11 +247,7 @@ client.on('interactionCreate', async (interaction) => {
         mrow(minput('prize',     'Prize',                                     'Prize name',  100)),
         mrow(minput('winners',   'Number of winners (max 10)',                 '1',             2)),
         mrow(minput('duration',  'Duration in minutes (min 0.5, max 23040)',   'e.g. 60',       6)),
-        mrow(minput('claimtime', 'Claim time in minutes (min 0.17, max 60)',   'e.g. 5',        4)),
-        mrow(new TextInputBuilder().setCustomId('bonus_roles')
-          .setLabel('Bonus entries: roleID:multiplier,roleID:multiplier')
-          .setStyle(TextInputStyle.Short).setRequired(false)
-          .setPlaceholder('e.g. 123456:2,789012:3'))
+        mrow(minput('claimtime', 'Claim time in minutes (min 0.17, max 60)',   'e.g. 5',        4))
       );
       await interaction.showModal(modal);
       return;
@@ -436,15 +260,13 @@ client.on('interactionCreate', async (interaction) => {
       if (!gw)          { await interaction.reply({ content: '⚠️ Giveaway not found.', flags: 64 }); return; }
       if (!gw.finished) { await interaction.reply({ content: '⚠️ Giveaway is still active.', flags: 64 }); return; }
 
-      const participants = db.prepare('SELECT user_id, entries FROM giveaway_participants WHERE message_id = ?').all(msgId);
-      const pool         = buildPool(participants);
-      const winners      = pickMultiple(pool, gw.winners);
-      const bonusRoles   = JSON.parse(gw.bonus_roles || '[]');
+      const participants = db.prepare('SELECT user_id FROM giveaway_participants WHERE message_id = ?').all(msgId).map(r => r.user_id);
+      const winners      = pickMultiple(participants, gw.winners);
 
       try {
         const ch  = await client.channels.fetch(gw.channel_id);
         const msg = await ch.messages.fetch(msgId);
-        await msg.edit({ embeds: [buildFinishedEmbed(gw, winners, participants.length, bonusRoles)] });
+        await msg.edit({ embeds: [buildFinishedEmbed(gw, winners, participants.length)] });
         const txt = winners.length
           ? `🔄 **Re-roll!** → ${winners.map(id => `<@${id}>`).join(', ')} 🎉`
           : '🔄 **Re-roll!** → No participants';
@@ -459,8 +281,7 @@ client.on('interactionCreate', async (interaction) => {
       const bought = interaction.options.getString('bought');
       const paid   = interaction.options.getString('paid');
       try {
-        const queueChId = QUEUE_CHANNELS[interaction.guild?.id] || QUEUE_CH;
-        const ch  = await client.channels.fetch(queueChId);
+        const ch  = await client.channels.fetch(QUEUE_CH);
         const msg = await ch.send(buildQueueText(user.id, bought, paid, 'ongoing'));
         await msg.edit({ components: [new ActionRowBuilder().addComponents(buildQueueSelect(msg.id))] });
         db.prepare('INSERT INTO queue_entries (message_id, user_id, bought, paid) VALUES (?, ?, ?, ?)').run(msg.id, user.id, bought, paid);
@@ -489,71 +310,6 @@ client.on('interactionCreate', async (interaction) => {
       await handleReply(null, interaction.user, interaction.options.getString('userid'), interaction.options.getString('message'), interaction);
       return;
     }
-
-    // /addxp
-    if (cmd === 'addxp') {
-      const user   = interaction.options.getUser('user');
-      const amount = interaction.options.getInteger('amount');
-      let data = db.prepare('SELECT * FROM levels WHERE guild_id = ? AND user_id = ?').get(GUILD_MAIN, user.id);
-      if (!data) {
-        db.prepare('INSERT INTO levels (guild_id, user_id, xp, level) VALUES (?, ?, 0, 0)').run(GUILD_MAIN, user.id);
-        data = { xp: 0, level: 0 };
-      }
-      const newXP    = data.xp + amount;
-      let   newLevel = data.level;
-      let   leveledUp = false;
-      while (newXP >= xpForLevel(newLevel + 1)) { newLevel++; leveledUp = true; }
-      db.prepare('UPDATE levels SET xp = ?, level = ? WHERE guild_id = ? AND user_id = ?').run(newXP, newLevel, GUILD_MAIN, user.id);
-      if (leveledUp) {
-        try {
-          const guild  = await client.guilds.fetch(GUILD_MAIN);
-          const member = await guild.members.fetch(user.id);
-          await handleLevelUp(member, newLevel);
-        } catch {}
-      }
-      await interaction.reply({ content: `✅ Added **${amount} XP** to ${user.tag}. Total: **${newXP} XP** (Level ${newLevel})`, flags: 64 });
-      return;
-    }
-
-    // /level
-    if (cmd === 'level') {
-      const target = interaction.options.getUser('user') || interaction.user;
-      const data   = db.prepare('SELECT * FROM levels WHERE guild_id = ? AND user_id = ?').get(GUILD_MAIN, target.id);
-      if (!data) { await interaction.reply({ content: `${target.tag} has no XP yet.`, flags: 64 }); return; }
-      const nextXP = xpForLevel(data.level + 1);
-      const embed  = new EmbedBuilder().setColor(0xFFFFFF)
-        .setTitle(`${target.username}'s level`)
-        .addFields(
-          { name: 'Level', value: `${data.level}`, inline: true },
-          { name: 'XP',    value: `${data.xp} / ${nextXP}`, inline: true }
-        );
-      await interaction.reply({ embeds: [embed], flags: 64 });
-      return;
-    }
-
-    // /addpingjoin
-    if (cmd === 'addpingjoin') {
-      const channel = interaction.options.getChannel('channel');
-      db.prepare('INSERT OR IGNORE INTO ping_on_join (guild_id, channel_id) VALUES (?, ?)').run(interaction.guild.id, channel.id);
-      await interaction.reply({ content: `✅ Added <#${channel.id}> to ping-on-join channels.`, flags: 64 });
-      return;
-    }
-
-    // /removepingjoin
-    if (cmd === 'removepingjoin') {
-      const channel = interaction.options.getChannel('channel');
-      db.prepare('DELETE FROM ping_on_join WHERE guild_id = ? AND channel_id = ?').run(interaction.guild.id, channel.id);
-      await interaction.reply({ content: `✅ Removed <#${channel.id}> from ping-on-join channels.`, flags: 64 });
-      return;
-    }
-
-    // /listpingjoin
-    if (cmd === 'listpingjoin') {
-      const rows = db.prepare('SELECT channel_id FROM ping_on_join WHERE guild_id = ?').all(interaction.guild.id);
-      if (!rows.length) { await interaction.reply({ content: '⚠️ No ping-on-join channels set.', flags: 64 }); return; }
-      await interaction.reply({ content: `**Ping-on-join channels:**\n${rows.map(r => `<#${r.channel_id}>`).join('\n')}`, flags: 64 });
-      return;
-    }
   }
 
   // ── MODALS ──
@@ -565,7 +321,6 @@ client.on('interactionCreate', async (interaction) => {
       const rawW      = interaction.fields.getTextInputValue('winners').trim();
       const rawDur    = interaction.fields.getTextInputValue('duration').trim();
       const rawClaim  = interaction.fields.getTextInputValue('claimtime').trim();
-      const rawBonus  = interaction.fields.getTextInputValue('bonus_roles').trim();
       const winners   = clamp(parseInt(rawW, 10) || 1, 1, 10);
       const minutes   = parseFloat(rawDur);
       const claimMins = parseFloat(rawClaim);
@@ -577,31 +332,22 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: '⚠️ Invalid claim time. Min 0.17 (10s), max 60 minutes.', flags: 64 }); return;
       }
 
-      const bonusRoles = [];
-      if (rawBonus) {
-        for (const part of rawBonus.split(',')) {
-          const [roleId, mult] = part.trim().split(':');
-          if (roleId && mult) bonusRoles.push({ roleId: roleId.trim(), multiplier: parseInt(mult.trim(), 10) || 2 });
-        }
-      }
-
-      const endsAt  = Date.now() + minutes * 60 * 1000;
+      const endsAt   = Date.now() + minutes * 60 * 1000;
       const hostedBy = interaction.user.id;
       const claimStr = claimMins < 1 ? `${Math.round(claimMins * 60)}s` : `${claimMins}m`;
-      const guildId  = interaction.guild?.id || GUILD_BOTS;
 
       await interaction.reply({ content: '✅ Giveaway created!', flags: 64 });
 
       const msg = await interaction.channel.send({
         content: '𝜗𝜚　**Giveaway** **!!**',
-        embeds: [buildActiveGWEmbed({ prize, winners, endsAt, hostedBy, participantCount: 0, bonusRoles })],
+        embeds: [buildActiveGWEmbed({ prize, winners, endsAt, hostedBy, participantCount: 0 })],
         components: [new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('gw_enter').setLabel('🎉 Enter').setStyle(ButtonStyle.Secondary)
         )]
       });
 
-      db.prepare('INSERT INTO giveaways (message_id, prize, winners, ends_at, hosted_by, claim_str, channel_id, guild_id, finished, bonus_roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)')
-        .run(msg.id, prize, winners, endsAt, hostedBy, claimStr, interaction.channel.id, guildId, JSON.stringify(bonusRoles));
+      db.prepare('INSERT INTO giveaways (message_id, prize, winners, ends_at, hosted_by, claim_str, channel_id, finished) VALUES (?, ?, ?, ?, ?, ?, ?, 0)')
+        .run(msg.id, prize, winners, endsAt, hostedBy, claimStr, interaction.channel.id);
 
       setTimeout(() => endGiveaway(msg.id), minutes * 60 * 1000);
       return;
@@ -644,8 +390,7 @@ client.on('interactionCreate', async (interaction) => {
     const entry  = db.prepare('SELECT * FROM queue_entries WHERE message_id = ?').get(msgId);
     if (!entry) { await interaction.reply({ content: '⚠️ Queue entry not found.', flags: 64 }); return; }
     try {
-      const queueChId = QUEUE_CHANNELS[interaction.guild?.id] || QUEUE_CH;
-        const ch  = await client.channels.fetch(queueChId);
+      const ch  = await client.channels.fetch(QUEUE_CH);
       const msg = await ch.messages.fetch(msgId);
       await msg.edit({ content: buildQueueText(entry.user_id, entry.bought, entry.paid, status), components: [new ActionRowBuilder().addComponents(buildQueueSelect(msgId))] });
       await interaction.reply({ content: `✅ Status updated to **${status}**.`, flags: 64 });
@@ -662,60 +407,43 @@ client.on('interactionCreate', async (interaction) => {
     const existing = db.prepare('SELECT 1 FROM giveaway_participants WHERE message_id = ? AND user_id = ?').get(gw.message_id, uid);
     if (existing)  { await interaction.reply({ content: '⚠️ You are already entered!', flags: 64 }); return; }
 
-    const bonusRoles = JSON.parse(gw.bonus_roles || '[]');
-    let entries = 1;
-    if (interaction.member && bonusRoles.length > 0) {
-      for (const br of bonusRoles) {
-        if (interaction.member.roles.cache.has(br.roleId)) {
-          entries = Math.max(entries, br.multiplier);
-        }
-      }
-    }
-
-    db.prepare('INSERT INTO giveaway_participants (message_id, user_id, entries) VALUES (?, ?, ?)').run(gw.message_id, uid, entries);
+    db.prepare('INSERT INTO giveaway_participants (message_id, user_id) VALUES (?, ?)').run(gw.message_id, uid);
     const count = db.prepare('SELECT COUNT(*) as c FROM giveaway_participants WHERE message_id = ?').get(gw.message_id).c;
 
     try {
       await interaction.message.edit({
-        embeds: [buildActiveGWEmbed({ prize: gw.prize, winners: gw.winners, endsAt: gw.ends_at, hostedBy: gw.hosted_by, participantCount: count, bonusRoles })]
+        embeds: [buildActiveGWEmbed({ prize: gw.prize, winners: gw.winners, endsAt: gw.ends_at, hostedBy: gw.hosted_by, participantCount: count })]
       });
     } catch {}
 
-    const entryTxt = entries > 1 ? ` with **${entries}x entries**` : '';
-    await interaction.reply({ content: `🎉 You entered for **${gw.prize}**${entryTxt}! Good luck 🍀`, flags: 64 });
+    await interaction.reply({ content: `🎉 You entered for **${gw.prize}**! Good luck 🍀`, flags: 64 });
   }
 });
 
 // ─────────────────────────────────────────────
 //  GIVEAWAY HELPERS
 // ─────────────────────────────────────────────
-function buildActiveGWEmbed({ prize, winners, endsAt, hostedBy, participantCount = 0, bonusRoles = [] }) {
-  const now      = new Date();
-  let bonusTxt   = '';
-  for (const br of bonusRoles) bonusTxt += `\n+<@&${br.roleId}> x${br.multiplier} entries`;
+function buildActiveGWEmbed({ prize, winners, endsAt, hostedBy, participantCount = 0 }) {
+  const now = new Date();
   return new EmbedBuilder().setColor(0xFFFFFF)
     .setDescription(
       `**${prize}**\n` +
       `End: <t:${Math.floor(endsAt / 1000)}:R>\n` +
       `Hosted by <@${hostedBy}>\n` +
-      `Participants: ${participantCount}` +
-      bonusTxt
+      `Participants: ${participantCount}`
     )
     .setFooter({ text: `${now.toLocaleDateString()} ${now.toLocaleTimeString()}` });
 }
 
-function buildFinishedEmbed(gw, winners, participantCount, bonusRoles = []) {
-  const w        = winners.length ? winners.map(id => `<@${id}>`).join(', ') : 'No participants';
-  const now      = new Date();
-  let bonusTxt   = '';
-  for (const br of bonusRoles) bonusTxt += `\n+<@&${br.roleId}> x${br.multiplier} entries`;
+function buildFinishedEmbed(gw, winners, participantCount) {
+  const w   = winners.length ? winners.map(id => `<@${id}>`).join(', ') : 'No participants';
+  const now = new Date();
   return new EmbedBuilder().setColor(0xFFFFFF)
     .setDescription(
       `**${gw.prize}**\n` +
       `Winner${gw.winners > 1 ? 's' : ''}: ${w}\n` +
       `Hosted by <@${gw.hosted_by}>\n` +
-      `Participants: ${participantCount}` +
-      bonusTxt
+      `Participants: ${participantCount}`
     )
     .setFooter({ text: `${now.toLocaleDateString()} ${now.toLocaleTimeString()}` });
 }
@@ -725,17 +453,15 @@ async function endGiveaway(messageId) {
   if (!gw || gw.finished) return;
   db.prepare('UPDATE giveaways SET finished = 1 WHERE message_id = ?').run(messageId);
 
-  const participants = db.prepare('SELECT user_id, entries FROM giveaway_participants WHERE message_id = ?').all(messageId);
-  const pool         = buildPool(participants);
-  const winners      = pickMultiple(pool, gw.winners);
-  const bonusRoles   = JSON.parse(gw.bonus_roles || '[]');
+  const participants = db.prepare('SELECT user_id FROM giveaway_participants WHERE message_id = ?').all(messageId).map(r => r.user_id);
+  const winners      = pickMultiple(participants, gw.winners);
 
   try {
     const ch  = await client.channels.fetch(gw.channel_id);
     const msg = await ch.messages.fetch(messageId);
     await msg.edit({
       content: '𝜗𝜚　**Giveaway** **!!**',
-      embeds: [buildFinishedEmbed(gw, winners, participants.length, bonusRoles)],
+      embeds: [buildFinishedEmbed(gw, winners, participants.length)],
       components: [new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('gw_enter').setLabel('🎉 Enter').setStyle(ButtonStyle.Secondary).setDisabled(true)
       )]
@@ -837,20 +563,12 @@ function buildQueueSelect(msgId) {
 // ─────────────────────────────────────────────
 //  UTILITIES
 // ─────────────────────────────────────────────
-function buildPool(participants) {
-  const pool = [];
-  for (const p of participants) {
-    for (let i = 0; i < (p.entries || 1); i++) pool.push(p.user_id);
-  }
-  return pool;
-}
-
 function pickMultiple(pool, count) {
   if (!pool || pool.length === 0) return [];
-  const p = [...pool], seen = new Set(), result = [];
+  const arr = [...pool], seen = new Set(), result = [];
   let attempts = 0;
-  while (result.length < Math.min(count, new Set(p).size) && attempts < 1000) {
-    const pick = p[Math.floor(Math.random() * p.length)];
+  while (result.length < Math.min(count, new Set(arr).size) && attempts < 1000) {
+    const pick = arr[Math.floor(Math.random() * arr.length)];
     if (!seen.has(pick)) { seen.add(pick); result.push(pick); }
     attempts++;
   }
